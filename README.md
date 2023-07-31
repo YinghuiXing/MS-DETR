@@ -31,5 +31,5 @@ $ python evaluation_script.py \
             state_of_arts/MLPD_result.txt \
             state_of_arts/MSDS-RCNN_result.txt 
 ```
-![result img](evaluation_script/FPPI_Reasonble.pdf)
+![result img](evaluation_script/FPPI_Reasonable.pdf)
 ![result img](evaluation_script/FPPI_All.jpg)
