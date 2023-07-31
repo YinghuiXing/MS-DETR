@@ -14,7 +14,7 @@ We draw all the results of state-of-the-art methods in a single figure to make i
 For annotations file, only json is supported, and for result files, json and txt formats are supported.
 (multiple `--rstFiles` are supported)
 
-Example)
+Example
 
 ```bash
 $ python evaluation_script.py \
