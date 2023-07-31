@@ -32,4 +32,4 @@ $ python evaluation_script.py \
             state_of_arts/MSDS-RCNN_result.txt 
 ```
 ![result img](evaluation_script/FPPI_Reasonable.pdf)
-![result img](evaluation_script/FPPI_All.jpg)
+![result img](evaluation_script/FPPI_All.pdf)
