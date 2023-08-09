@@ -33,3 +33,16 @@ $ python evaluation_script.py \
 ```
 ![result img](evaluation_script/FPPI_Reasonable.jpg)
 ![result img](evaluation_script/FPPI_All.jpg)
+
+## Citation
+
+If you find this code helpful, please kindly cite:
+
+@misc{xing2023msdetr,
+      title={MS-DETR: Multispectral Pedestrian Detection Transformer with Loosely Coupled Fusion and Modality-Balanced Optimization}, 
+      author={Yinghui Xing and Song Wang and Shizhou Zhang and Guoqiang Liang and Xiuwei Zhang and Yanning Zhang},
+      year={2023},
+      eprint={2302.00290},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
+}
