@@ -38,11 +38,9 @@ $ python evaluation_script.py \
 
 If you find this code helpful, please kindly cite:
 
-@misc{xing2023msdetr,
-      title={MS-DETR: Multispectral Pedestrian Detection Transformer with Loosely Coupled Fusion and Modality-Balanced Optimization}, 
-      author={Yinghui Xing and Song Wang and Shizhou Zhang and Guoqiang Liang and Xiuwei Zhang and Yanning Zhang},
-      year={2023},
-      eprint={2302.00290},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV}
+@article{xing2023multispectral,
+  title={Multispectral Pedestrian Detection via Reference Box Constrained Cross Attention and Modality Balanced Optimization},
+  author={Xing, Yinghui and Wang, Song and Liang, Guoqiang and Li, Qingyi and Zhang, Xiuwei and Zhang, Shizhou and Zhang, Yanning},
+  journal={arXiv preprint arXiv:2302.00290},
+  year={2023}
 }
