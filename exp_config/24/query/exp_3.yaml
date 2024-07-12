@@ -1,0 +1,61 @@
+# 10271
+# nohup python -m torch.distributed.launch --nproc_per_node=4 --master_port 49104  fusion_main.py --exp_config exp_config/24/exp_1.yaml --output_dir /data/wangsong/results/24/exp1 --action train > ../DAB-DETR-nohup/ms-detr/24_1_nohup &
+# python fusion_main.py --output_dir /data/wangsong/results/24/exp1 --action test --resume /data/wangsong/results/24/exp1/checkpoint.pth --exp_config exp_config/24/exp_1.yaml --visible_devices 2
+# python fusion_main.py --output_dir /data/wangsong/results/23_5_25/exp45 --action test --resume /data/wangsong/results/23_5_25/exp45/checkpoint.pth --exp_config exp_config/23_5_25/exp_45.yaml --visible_devices 2 
+# ./eval.sh /home/Newdisk/zhangshizhou/23_5_25/exp45 test /home/Newdisk/zhangshizhou/23_5_25/exp45/checkpoint.pth exp_config/23_5_25/exp_45.yaml 2
+
+# 当前消融实验1   query number 50 
+# yangshuo 2024.4.7
+# torchrun --nproc_per_node=4 --master_port 49105  fusion_main.py --exp_config exp_config/24/query/exp_3.yaml --output_dir /data/wangsong/results/24/query/exp3 --action train 
+# python fusion_main.py --output_dir /data/wangsong/results/24/query/exp3 --action test --resume /data/wangsong/results/24/query/exp3/checkpoint.pth --exp_config exp_config/24/query/exp_3.yaml
+
+TRAIN:
+  lr_backbone: 1e-4  # 不用动 
+  epochs: 20         # 不用动  
+  lr_drop: [10, ]    # 都是10e后变为原来的1/10
+  save_checkpoint_interval: 1   # 一轮存一个  
+MODEL:
+  BACKBONE:
+    backbone_share: False     # 不共享权重  
+  MS_DETR:
+    use_dab: False     # 不用dab   
+    num_feature_levels: 4    # backbone使用四层特征 
+    num_queries: 50  # modify number of queries  200 - 100 - 50  ? 
+    content_embedding: False    # ? 
+    rgb_branch: True    #   三路启动 
+    t_branch: True     #    三路启动
+    analysis_weights: True   
+  TRANSFORMER:
+    fusion_backbone_encoder: False   
+    dim_feedforward: 1024
+    num_feature_levels: 4
+    ENCODER:
+      layers_rgb: 6   
+      layers_t: 6   
+      layers_share: 0
+      pre_norm: False
+    DECODER:
+      layers: 6
+      pre_norm: False
+      use_region_ca: False
+  LOSS:
+    instance_reweight: True
+    start_dynamic_weight: 0
+  POST_PROCESS:
+    num_select: 50
+
+ 
+DATASET:
+  KAIST:
+    root_dirs_train: ['/data/wangsong/datasets/KAIST', ]
+    root_dirs_test: ['/data/wangsong/datasets/KAIST', ]
+  TRANSFORMS:
+    RANDAUGMENT:
+      flag: True
+      aug_space: 'color'
+      num: 2
+      level: 10
+      random: True
+
+EXPERIMENT:
+    pretrain_model_path: 'pretrain_models/r50_deformable_detr_plus_iterative_bbox_refinement-checkpoint.pth'

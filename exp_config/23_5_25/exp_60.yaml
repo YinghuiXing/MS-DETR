@@ -1,0 +1,50 @@
+# 10184
+# nohup python -m torch.distributed.launch --nproc_per_node=4 fusion_main.py --exp_config exp_config/23_5_25/exp_59.yaml --output_dir /data/wangsong/results/23_5_25/exp59 --action train > ../DAB-DETR-nohup/ms-detr/23_5_25_59_nohup &
+# python fusion_main.py --output_dir /data/wangsong/results/23_5_25/exp59 --action test --resume /data/wangsong/results/23_5_25/exp59/checkpoint.pth --exp_config exp_config/23_5_25/exp_59.yaml --visible_devices 2
+# ./eval.sh /home/Newdisk/zhangshizhou/23_5_25/exp45 test /home/Newdisk/zhangshizhou/23_5_25/exp45/checkpoint.pth exp_config/23_5_25/exp_45.yaml 2
+TRAIN:
+  lr_backbone: 1e-4
+  epochs: 20
+  lr_drop: [10, ]
+  save_checkpoint_interval: 1
+MODEL:
+  BACKBONE:
+    backbone_share: False
+  MS_DETR:
+    use_dab: False
+    num_feature_levels: 4
+    num_queries: 300
+    content_embedding: False
+    rgb_branch: False
+    t_branch: False
+  TRANSFORMER:
+    after_encoder_concat: True
+    fusion_backbone_encoder: False
+    dim_feedforward: 1024
+    num_feature_levels: 4
+    ENCODER:
+      layers_rgb: 6
+      layers_t: 6
+      layers_share: 0
+      pre_norm: False
+    DECODER:
+      pre_norm: False
+      use_region_ca: False
+      fusion: False
+  LOSS:
+    instance_reweight: False
+
+DATASET:
+  KAIST:
+    root_dirs_train: ['/data/wangsong/datasets/KAIST', ]
+    root_dirs_test: ['/data/wangsong/datasets/KAIST', ]
+  TRANSFORMS:
+    RANDAUGMENT:
+      flag: True
+      aug_space: 'color'
+      num: 2
+      level: 10
+      random: True
+
+EXPERIMENT:
+    pretrain_model_path: 'pretrain_models/r50_deformable_detr_plus_iterative_bbox_refinement-checkpoint.pth'

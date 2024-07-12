@@ -1,0 +1,453 @@
+import os
+import torch
+import math
+
+import torch.nn.functional as F
+
+from torch import nn
+from util.misc import (NestedTensor, nested_tensor_from_tensor_list, inverse_sigmoid)
+from .dab_deformable_detr import MLP, _get_clones
+
+
+class FusionDABDeformableDETR(nn.Module):
+    """ This is the DAB-Deformable-DETR for multi_spectral pedestrian detection """
+
+    def _init_input_proj(self, num_feature_levels, strides, num_channels, hidden_dim):
+        input_proj_list = []
+        if num_feature_levels > 1:
+            num_backbone_outs = len(strides)
+            assert num_feature_levels >= num_backbone_outs
+            for _ in range(num_backbone_outs):
+                in_channels = num_channels[_]
+                input_proj_list.append(nn.Sequential(
+                    nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
+                    nn.GroupNorm(32, hidden_dim),
+                ))
+            for _ in range(num_feature_levels - num_backbone_outs):
+                input_proj_list.append(nn.Sequential(
+                    nn.Conv2d(in_channels, hidden_dim, kernel_size=3, stride=2, padding=1),
+                    nn.GroupNorm(32, hidden_dim),
+                ))
+                in_channels = hidden_dim
+        else:
+            input_proj_list.append(nn.Sequential(
+                nn.Conv2d(num_channels[0], hidden_dim, kernel_size=1),
+                nn.GroupNorm(32, hidden_dim),
+            ))
+        return input_proj_list
+
+    def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels,
+                 aux_loss=True, with_box_refine=True, two_stage=False,
+                 use_dab=True,
+                 num_patterns=0,
+                 random_refpoints_xy=False,
+                 illumination=False,
+                 action='train',
+                 no_content_embedding=False,
+                 object_queries_jitter=False,
+                 three_branch=False,
+                 backbone_fusion=False
+                 ):
+        """ Initializes the model.
+        Parameters:
+            backbone: torch module of the backbone to be used. See backbone.py
+            transformer: torch module of the transformer architecture. See transformer.py
+            num_classes: number of object classes
+            num_queries: number of object queries, ie detection slot. This is the maximal number of objects
+                         DETR can detect in a single image. For COCO, we recommend 100 queries.
+            num_feature_levels: number of feature levels
+            aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
+            with_box_refine: iterative bounding box refinement
+            two_stage: two-stage Deformable DETR
+            use_dab: using dynamic anchor boxes formulation
+            num_patterns: number of pattern embeddings
+            random_refpoints_xy: random init the x,y of anchor boxes and freeze them. (It sometimes helps to improve the performance)
+            illumination: True if use illumination_net to re_weight features and attention
+            action: train, test or inference
+        """
+        super().__init__()
+        self.num_queries = num_queries
+        self.transformer = transformer
+        hidden_dim = transformer.d_model
+        self.class_embed = nn.Linear(hidden_dim, num_classes)
+        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+
+        if three_branch:
+            self.class_embed_rgb = nn.Linear(hidden_dim, num_classes)
+            self.class_embed_t = nn.Linear(hidden_dim, num_classes)
+
+            self.bbox_embed_rgb = MLP(hidden_dim, hidden_dim, 4, 3)
+            self.bbox_embed_t = MLP(hidden_dim, hidden_dim, 4, 3)
+
+        self.num_feature_levels = num_feature_levels
+        self.use_dab = use_dab
+        self.num_patterns = num_patterns
+        self.random_refpoints_xy = random_refpoints_xy
+        self.illumination = illumination
+        self.action = action
+        self.object_queries_jitter = object_queries_jitter
+        self.three_branch = three_branch
+        self.backbone_fusion = backbone_fusion
+
+        if backbone_fusion:
+            assert not three_branch
+
+        if not two_stage:
+            if not use_dab:
+                self.query_embed = nn.Embedding(num_queries, hidden_dim * 2)
+                if self.three_branch:
+                    self.tgt_embed_rgb = nn.Embedding(num_queries, hidden_dim)
+                    self.tgt_embed_t = nn.Embedding(num_queries, hidden_dim)
+            else:
+                # 默认使用dab(dynamic anchor box)
+                if no_content_embedding:
+                    self.tgt_embed = None
+                else:
+                    self.tgt_embed = nn.Embedding(num_queries, hidden_dim)
+                    if self.three_branch:
+                        self.tgt_embed_rgb = nn.Embedding(num_queries, hidden_dim)
+                        self.tgt_embed_t = nn.Embedding(num_queries, hidden_dim)
+                self.refpoint_embed = nn.Embedding(num_queries, 4)
+                if random_refpoints_xy:
+                    # import ipdb; ipdb.set_trace()
+                    self.refpoint_embed.weight.data[:, :2].uniform_(0, 1)
+                    self.refpoint_embed.weight.data[:, :2] = inverse_sigmoid(self.refpoint_embed.weight.data[:, :2])
+                    self.refpoint_embed.weight.data[:, :2].requires_grad = False
+
+        # 默认num_patterns == 0
+        if self.num_patterns > 0:
+            self.patterns_embed = nn.Embedding(self.num_patterns, hidden_dim)
+
+        self.input_proj_fusion = None
+        self.input_proj_rgb = None
+        self.input_proj_t = None
+        if self.backbone_fusion:
+            input_proj_list_fusion = self._init_input_proj(num_feature_levels, backbone.strides, backbone.num_channels_fusion, hidden_dim)
+            self.input_proj_fusion = nn.ModuleList(input_proj_list_fusion)
+        else:
+            input_proj_list_rgb = self._init_input_proj(num_feature_levels, backbone.strides, backbone.num_channels_rgb, hidden_dim)
+            input_proj_list_t = self._init_input_proj(num_feature_levels, backbone.strides, backbone.num_channels_t, hidden_dim)
+            self.input_proj_rgb = nn.ModuleList(input_proj_list_rgb)
+            self.input_proj_t = nn.ModuleList(input_proj_list_t)
+
+        self.backbone = backbone
+        self.aux_loss = aux_loss
+        self.with_box_refine = with_box_refine
+        self.two_stage = two_stage
+
+        prior_prob = 0.01
+        bias_value = -math.log((1 - prior_prob) / prior_prob)
+        self.class_embed.bias.data = torch.ones(num_classes) * bias_value
+
+        nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
+        nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
+
+        if self.input_proj_fusion is not None:
+            for proj in self.input_proj_fusion:
+                nn.init.xavier_uniform_(proj[0].weight, gain=1)
+                nn.init.constant_(proj[0].bias, 0)
+        else:
+            for proj in self.input_proj_rgb:
+                nn.init.xavier_uniform_(proj[0].weight, gain=1)
+                nn.init.constant_(proj[0].bias, 0)
+            for proj in self.input_proj_t:
+                nn.init.xavier_uniform_(proj[0].weight, gain=1)
+                nn.init.constant_(proj[0].bias, 0)
+
+        # if two-stage, the last class_embed and bbox_embed is for region proposal generation
+        num_pred = (transformer.decoder.num_layers + 1) if two_stage else transformer.decoder.num_layers
+        if with_box_refine:
+            self.class_embed = _get_clones(self.class_embed, num_pred)
+            self.bbox_embed = _get_clones(self.bbox_embed, num_pred)
+
+            if self.three_branch:
+                self.class_embed_rgb = _get_clones(self.class_embed_rgb, num_pred)
+                self.bbox_embed_rgb = _get_clones(self.bbox_embed_rgb, num_pred)
+
+                self.class_embed_t = _get_clones(self.class_embed_t, num_pred)
+                self.bbox_embed_t = _get_clones(self.bbox_embed_t, num_pred)
+
+                nn.init.constant_(self.bbox_embed_rgb[0].layers[-1].bias.data[2:], -2.0)
+                nn.init.constant_(self.bbox_embed_t[0].layers[-1].bias.data[2:], -2.0)
+
+            nn.init.constant_(self.bbox_embed[0].layers[-1].bias.data[2:], -2.0)
+            # hack implementation for iterative bounding box refinement
+            self.transformer.decoder.bbox_embed = self.bbox_embed
+        else:
+            nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
+            self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
+            self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
+            self.transformer.decoder.bbox_embed = None
+        if two_stage:
+            # hack implementation for two-stage
+            self.transformer.decoder.class_embed = self.class_embed
+            for box_embed in self.bbox_embed:
+                nn.init.constant_(box_embed.layers[-1].bias.data[2:], 0.0)
+
+    def forward(self, samples_rgb: NestedTensor, samples_t: NestedTensor):
+        """ The forward expects two NestedTensors, which consists of:
+               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
+               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+
+            It returns a dict with the following elements:
+               - "pred_logits": the classification logits (including no-object) for all queries.
+                                Shape= [batch_size x num_queries x (num_classes + 1)]
+               - "pred_boxes": The normalized boxes coordinates for all queries, represented as
+                               (center_x, center_y, height, width). These values are normalized in [0, 1],
+                               relative to the size of each individual image (disregarding possible padding).
+                               See PostProcess for information on how to retrieve the unnormalized bounding box.
+               - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
+                                dictionnaries containing the two above keys for each decoder layer.
+        """
+        if not isinstance(samples_rgb, NestedTensor):
+            samples_rgb = nested_tensor_from_tensor_list(samples_rgb)
+        if not isinstance(samples_t, NestedTensor):
+            samples_t = nested_tensor_from_tensor_list(samples_t)
+
+        features_rgb, features_t, pos_rgb, pos_t, illu_dict, features_fusion, pos_fusion = self.backbone(samples_rgb, samples_t)
+        if self.backbone_fusion:
+            assert len(features_fusion) == len(pos_fusion)
+        else:
+            assert len(features_rgb) == len(features_t) == len(pos_rgb) == len(pos_t)
+
+        w_dn, w_rgb, w_t = None, None, None
+        if self.illumination:
+            assert illu_dict is not None and 'w_dn' in illu_dict
+            w_dn = illu_dict['w_dn']
+            w_dn_sigmoid = w_dn.sigmoid()
+
+            if 'w_r' in illu_dict:
+                w_rgb = illu_dict['w_r']
+                w_t = 1 - w_rgb
+            else:
+                w_rgb = w_dn_sigmoid[:, 0][:, None]
+                w_t = w_dn_sigmoid[:, 1][:, None]
+
+        srcs_rgb = []
+        srcs_t = []
+        srcs_fusion = []
+        masks_rgb = []
+        masks_t = []
+        masks_fusion = []
+
+        if self.backbone_fusion:
+            for l in range(len(features_fusion)):
+                src_fusion, mask_fusion = features_fusion[l].decompose()
+                srcs_fusion.append(self.input_proj_fusion[l](src_fusion))
+                masks_fusion.append(mask_fusion)
+                assert mask_fusion is not None
+
+            if self.num_feature_levels > len(features_fusion):
+                _len_srcs = len(srcs_fusion)
+                for l in range(_len_srcs, self.num_feature_levels):
+                    if l == _len_srcs:
+                        src_fusion = self.input_proj_fusion[l](features_fusion[-1].tensors)
+                    else:
+                        src_fusion = self.input_proj_fusion[l](srcs_fusion[-1])
+
+                    m_rgb = samples_rgb.mask
+                    m_t = samples_t.mask
+                    assert m_rgb.equal(m_t)
+                    mask_fusion = F.interpolate(m_rgb[None].float(), size=src_fusion.shape[-2:]).to(torch.bool)[0]
+
+                    pos_l_fusion = self.backbone[1](NestedTensor(src_fusion, mask_fusion)).to(src_fusion.dtype)
+
+                    srcs_fusion.append(src_fusion)
+                    masks_fusion.append(mask_fusion)
+                    pos_fusion.append(pos_l_fusion)
+            srcs = srcs_fusion
+            masks = masks_fusion
+            pos = pos_fusion
+        else:
+            for l in range(len(features_rgb)):
+                src_rgb, mask_rgb = features_rgb[l].decompose()
+                src_t, mask_t = features_t[l].decompose()
+
+                srcs_rgb.append(self.input_proj_rgb[l](src_rgb))
+                srcs_t.append(self.input_proj_t[l](src_t))
+
+                masks_rgb.append(mask_rgb)
+                masks_t.append(mask_t)
+                assert mask_rgb is not None
+                assert mask_t is not None
+
+            assert len(srcs_rgb) == len(srcs_t)
+
+            if self.num_feature_levels > len(features_rgb):
+                _len_srcs = len(srcs_rgb)
+                for l in range(_len_srcs, self.num_feature_levels):
+                    if l == _len_srcs:
+                        src_rgb = self.input_proj_rgb[l](features_rgb[-1].tensors)
+                        src_t = self.input_proj_t[l](features_t[-1].tensors)
+                    else:
+                        src_rgb = self.input_proj_rgb[l](srcs_rgb[-1])
+                        src_t = self.input_proj_t[l](srcs_t[-1])
+
+                    m_rgb = samples_rgb.mask
+                    m_t = samples_t.mask
+                    mask_rgb = F.interpolate(m_rgb[None].float(), size=src_rgb.shape[-2:]).to(torch.bool)[0]
+                    mask_t = F.interpolate(m_t[None].float(), size=src_t.shape[-2:]).to(torch.bool)[0]
+
+                    pos_l_rgb = self.backbone[1](NestedTensor(src_rgb, mask_rgb)).to(src_rgb.dtype)
+                    pos_l_t = self.backbone[1](NestedTensor(src_t, mask_t)).to(src_t.dtype)
+
+                    srcs_rgb.append(src_rgb)
+                    srcs_t.append(src_t)
+
+                    masks_rgb.append(mask_rgb)
+                    masks_t.append(mask_t)
+
+                    pos_rgb.append(pos_l_rgb)
+                    pos_t.append(pos_l_t)
+
+            srcs = srcs_rgb + srcs_t
+            masks = masks_rgb + masks_t
+            pos = pos_rgb + pos_t
+
+        if self.two_stage:
+            query_embeds = None
+        elif self.use_dab:
+            if self.num_patterns == 0:
+                refanchor = self.refpoint_embed.weight  # nq, 4
+                if self.tgt_embed is not None:
+                    tgt_embed = self.tgt_embed.weight  # nq, 256
+                    if self.three_branch:
+                        tgt_embed_rgb = self.tgt_embed_rgb.weight
+                        tgt_embed_t = self.tgt_embed_t.weight
+                else:
+                    tgt_embed = torch.zeros((self.num_queries, self.transformer.d_model), device=refanchor.device)
+                if self.three_branch:
+                    query_embeds = torch.cat((tgt_embed, refanchor, tgt_embed_rgb, tgt_embed_t), dim=1)
+                else:
+                    query_embeds = torch.cat((tgt_embed, refanchor), dim=1)
+            else:
+                # multi patterns
+                tgt_embed = self.tgt_embed.weight  # nq, 256
+                pat_embed = self.patterns_embed.weight  # num_pat, 256
+                tgt_embed = tgt_embed.repeat(self.num_patterns, 1)  # nq*num_pat, 256
+                pat_embed = pat_embed[:, None, :].repeat(1, self.num_queries, 1).flatten(0, 1)  # nq*num_pat, 256
+                tgt_all_embed = tgt_embed + pat_embed
+                refanchor = self.refpoint_embed.weight.repeat(self.num_patterns, 1)  # nq*num_pat, 4
+                query_embeds = torch.cat((tgt_all_embed, refanchor), dim=1)
+        else:
+            query_embeds = self.query_embed.weight
+            if self.three_branch:
+                tgt_embed_rgb = self.tgt_embed_rgb.weight
+                tgt_embed_t = self.tgt_embed_t.weight
+                query_embeds = torch.cat((query_embeds, tgt_embed_rgb, tgt_embed_t), dim=1)
+
+        batch_size = samples_rgb.tensors.shape[0]
+        if self.object_queries_jitter:
+            jitter = torch.randn((batch_size, self.num_queries, 2), device=samples_rgb.tensors.device) / 20
+        else:
+            jitter = torch.zeros((batch_size, self.num_queries, 2), device=samples_rgb.tensors.device)
+
+        hs, init_reference, inter_references, roi_deltas_list, enc_outputs_class, enc_outputs_coord_unact, points_list, weights_list, hs_rgb, hs_t = self.transformer(srcs, masks, pos, query_embeds, w_rgb, w_t, jitter)
+
+        outputs_classes = []
+        outputs_coords = []
+
+        if self.three_branch:
+            outputs_classes_rgb = []
+            outputs_coords_rgb = []
+
+            outputs_classes_t = []
+            outputs_coords_t = []
+
+        for lvl in range(hs.shape[0]):
+            if lvl == 0:
+                reference = init_reference
+            else:
+                reference = inter_references[lvl - 1]
+            reference = inverse_sigmoid(reference)
+            outputs_class = self.class_embed[lvl](hs[lvl])
+            tmp = self.bbox_embed[lvl](hs[lvl])
+
+            if self.three_branch:
+                outputs_class_rgb = self.class_embed_rgb[lvl](hs_rgb[lvl])
+                tmp_rgb = self.bbox_embed_rgb[lvl](hs_rgb[lvl])
+
+                outputs_class_t = self.class_embed_t[lvl](hs_t[lvl])
+                tmp_t = self.bbox_embed_t[lvl](hs_t[lvl])
+
+            if reference.shape[-1] == 4:
+                tmp += reference
+
+                if self.three_branch:
+                    tmp_rgb += reference
+                    tmp_t += reference
+            else:
+                assert reference.shape[-1] == 2
+                tmp[..., :2] += reference
+
+                if self.three_branch:
+                    tmp_rgb[..., :2] += reference
+                    tmp_t[..., :2] += reference
+            outputs_coord = tmp.sigmoid()
+
+            if self.three_branch:
+                outputs_coord_rgb = tmp_rgb.sigmoid()
+                outputs_coord_t = tmp_t.sigmoid()
+            outputs_classes.append(outputs_class)
+            outputs_coords.append(outputs_coord)
+
+            if self.three_branch:
+                outputs_classes_rgb.append(outputs_class_rgb)
+                outputs_coords_rgb.append(outputs_coord_rgb)
+
+                outputs_classes_t.append(outputs_class_t)
+                outputs_coords_t.append(outputs_coord_t)
+
+        outputs_class = torch.stack(outputs_classes)
+        outputs_coord = torch.stack(outputs_coords)
+
+        if self.three_branch:
+            outputs_class_rgb = torch.stack(outputs_classes_rgb)
+            outputs_coord_rgb = torch.stack(outputs_coords_rgb)
+
+            outputs_class_t = torch.stack(outputs_classes_t)
+            outputs_coord_t = torch.stack(outputs_coords_t)
+
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_roi_deltas': roi_deltas_list[-1], 'jitter': jitter}
+        out_rgb = None
+        out_t = None
+
+        out['w_dn'] = w_dn
+        out['w_rgb'] = w_rgb
+        out['w_t'] = w_t
+
+        if self.three_branch:
+            out_rgb = {'pred_logits': outputs_class_rgb[-1], 'pred_boxes': outputs_coord_rgb[-1]}
+            out_t = {'pred_logits': outputs_class_t[-1], 'pred_boxes': outputs_coord_t[-1]}
+
+        if self.action == 'inference':
+            out['points_list'] = points_list
+            out['weights_list'] = weights_list
+            out['init_reference'] = init_reference
+            out['inter_references'] = inter_references
+
+        if self.aux_loss:
+            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, roi_deltas_list, jitter)
+            if self.three_branch:
+                out_rgb['aux_outputs'] = self._set_aux_loss(outputs_class_rgb, outputs_coord_rgb)
+                out_t['aux_outputs'] = self._set_aux_loss(outputs_class_t, outputs_coord_t)
+
+        if self.two_stage:
+            enc_outputs_coord = enc_outputs_coord_unact.sigmoid()
+            out['enc_outputs'] = {'pred_logits': enc_outputs_class, 'pred_boxes': enc_outputs_coord}
+            if os.environ.get('IPDB_SHILONG_DEBUG') == 'INFO':
+                import ipdb;
+                ipdb.set_trace()
+        return out, out_rgb, out_t
+
+    @torch.jit.unused
+    def _set_aux_loss(self, outputs_class, outputs_coord, roi_deltas_list=None, jitter=None):
+        # this is a workaround to make torchscript happy, as torchscript
+        # doesn't support dictionary with non-homogeneous values, such
+        # as a dict having both a Tensor and a list.
+        if roi_deltas_list is not None and jitter is not None:
+            return [{'pred_logits': a, 'pred_boxes': b, 'pred_roi_deltas': c, 'jitter': jitter} for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], roi_deltas_list[:-1])]
+        else:
+            return [{'pred_logits': a, 'pred_boxes': b} for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+
+

@@ -1,0 +1,54 @@
+# 10183
+# nohup python -m torch.distributed.launch --nproc_per_node=4 --master_port 49104  fusion_main.py --exp_config exp_config/CVC14/exp_2.yaml --output_dir /home/Newdisk/zhangshizhou/results/CVC14/exp2 --action train > ../DAB-DETR-nohup/ms-detr/CVC14_2_nohup &
+# python fusion_main.py --output_dir /home/Newdisk/zhangshizhou/results/CVC14/exp2 --action test --resume /home/Newdisk/zhangshizhou/results/CVC14/exp2/checkpoint.pth --exp_config exp_config/CVC14/exp_2.yaml --visible_devices 2
+# ./eval.sh /home/Newdisk/zhangshizhou/results/CVC14/exp1 test /home/Newdisk/zhangshizhou/results/CVC14/exp1/checkpoint.pth exp_config/CVC14/exp_1.yaml 2
+TRAIN:
+  lr_backbone: 1e-4
+  epochs: 10
+  lr_drop: [5, ]
+  save_checkpoint_interval: 1
+TEST:
+  metric: 'cvc14'
+
+MODEL:
+  MS_DETR:
+    use_dab: False
+    num_feature_levels: 4
+    num_queries: 300
+    content_embedding: False
+    rgb_branch: True
+    t_branch: True
+  TRANSFORMER:
+    dim_feedforward: 1024
+    num_feature_levels: 4
+    ENCODER:
+      layers_rgb: 6
+      layers_t: 6
+      pre_norm: False
+    DECODER:
+      pre_norm: False
+      use_region_ca: False
+      fusion: True
+  LOSS:
+    instance_reweight: True
+
+DATASET:
+  format: 'cvc14'
+  KAIST:
+    root_dirs_train: ['/home/Newdisk/zhangshizhou/datasets/CVC-14', ]
+    root_dirs_test: ['/home/Newdisk/zhangshizhou/datasets/CVC-14', ]
+    rgb_datasets_train: ['train_cvc14_visible', ]
+    t_datasets_train: ['train_cvc14_fir', ]
+    rgb_datasets_test: ['test_cvc14_visible', ]
+    t_datasets_test: ['test_cvc14_fir', ]
+  TRANSFORMS:
+    img_size: (471, 640)
+    RANDAUGMENT:
+      flag: True
+      aug_space: 'color'
+      num: 2
+      level: 10
+      random: True
+
+EXPERIMENT:
+  pretrain_model_path: '/home/Newdisk/zhangshizhou/23_5_25/exp45/checkpoint.pth'

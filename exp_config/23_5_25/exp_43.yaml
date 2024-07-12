@@ -1,0 +1,43 @@
+# 10184
+# nohup python -m torch.distributed.launch --nproc_per_node=4 --master_port 49104  fusion_main.py --exp_config exp_config/23_5_25/exp_43.yaml --output_dir /home/Newdisk/zhangshizhou/23_5_25/exp43 --action train > ../DAB-DETR-nohup/ms-detr/23_5_25_43_nohup &
+# python fusion_main.py --output_dir /home/Newdisk/zhangshizhou/23_5_25/exp43 --action test --resume /home/Newdisk/zhangshizhou/23_5_25/exp43/checkpoint.pth --exp_config exp_config/23_5_25/exp_43.yaml --visible_devices 2
+TRAIN:
+  lr_backbone: 1e-4
+  epochs: 20
+  lr_drop: [10, ]
+  save_checkpoint_interval: 1
+MODEL:
+  BACKBONE:
+    backbone_share: False
+  MS_DETR:
+    use_dab: False
+    num_feature_levels: 4
+    num_queries: 300
+    content_embedding: False
+  TRANSFORMER:
+    fusion_backbone_encoder: False
+    dim_feedforward: 1024
+    num_feature_levels: 4
+    ENCODER:
+      layers_rgb: 6
+      layers_t: 6
+      layers_share: 0
+      pre_norm: False
+    DECODER:
+      pre_norm: False
+      use_region_ca: False
+
+DATASET:
+  KAIST:
+    root_dirs_train: ['/home/Newdisk/zhangshizhou/datasets/KAIST', ]
+    root_dirs_test: ['/home/Newdisk/zhangshizhou/datasets/KAIST', ]
+  TRANSFORMS:
+    RANDAUGMENT:
+      flag: True
+      aug_space: 'color'
+      num: 2
+      level: 10
+      random: True
+
+EXPERIMENT:
+    pretrain_model_path: '/home/Newdisk/zhangshizhou/pretrain/r50_deformable_detr_plus_iterative_bbox_refinement-checkpoint.pth'

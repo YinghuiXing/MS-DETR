@@ -1,0 +1,4 @@
+# ninja log v5
+0	6233	1712027359815185360	/home/wangsong/exp/rgbt_ped_dect/Fusion-DETR-v1/models/dab_deformable_detr/ops/build/temp.linux-x86_64-cpython-39/home/wangsong/exp/rgbt_ped_dect/Fusion-DETR-v1/models/dab_deformable_detr/ops/src/cpu/ms_deform_attn_cpu.o	3af9cf8a9164a7fe
+0	19427	1712027373011200042	/home/wangsong/exp/rgbt_ped_dect/Fusion-DETR-v1/models/dab_deformable_detr/ops/build/temp.linux-x86_64-cpython-39/home/wangsong/exp/rgbt_ped_dect/Fusion-DETR-v1/models/dab_deformable_detr/ops/src/vision.o	93a83a93fae61de5
+0	22605	1712027376167204382	/home/wangsong/exp/rgbt_ped_dect/Fusion-DETR-v1/models/dab_deformable_detr/ops/build/temp.linux-x86_64-cpython-39/home/wangsong/exp/rgbt_ped_dect/Fusion-DETR-v1/models/dab_deformable_detr/ops/src/cuda/ms_deform_attn_cuda.o	689b0ae72c38d446

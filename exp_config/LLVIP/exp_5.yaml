@@ -1,0 +1,55 @@
+# 10271
+# nohup python -m torch.distributed.launch --nproc_per_node=4 --master_port 49104  fusion_main.py --exp_config exp_config/LLVIP/exp_5.yaml --output_dir /data/wangsong/results/LLVIP/exp5 --action train > ../DAB-DETR-nohup/ms-detr/LLVIP_5_nohup &
+# python fusion_main.py --output_dir /data/wangsong/results/LLVIP/exp5 --action test --resume /data/wangsong/results/LLVIP/exp5/checkpoint.pth --exp_config exp_config/LLVIP/exp_5.yaml --visible_devices 2
+# ./eval.sh /data/wangsong/results/LLVIP/exp5 test /data/wangsong/results/LLVIP/exp5/checkpoint.pth exp_config/LLVIP/exp_5.yaml 2
+TRAIN:
+  lr_backbone: 1e-4
+  epochs: 20
+  lr_drop: [10, ]
+  save_checkpoint_interval: 1
+TEST:
+  metric: 'ap'
+
+MODEL:
+  MS_DETR:
+    use_dab: False
+    num_feature_levels: 4
+    num_queries: 300
+    content_embedding: False
+    rgb_branch: True
+    t_branch: True
+  TRANSFORMER:
+    dim_feedforward: 1024
+    num_feature_levels: 4
+    ENCODER:
+      layers_rgb: 6
+      layers_t: 6
+      pre_norm: False
+    DECODER:
+      pre_norm: False
+      use_region_ca: False
+  LOSS:
+    instance_reweight: True
+
+DATASET:
+  format: 'voc'
+  KAIST:
+    root_dirs_train: ['/data/wangsong/datasets/LLVIP', ]
+    root_dirs_test: ['/data/wangsong/datasets/LLVIP', ]
+    rgb_datasets_train: ['LLVIP_rgb_train', ]
+    t_datasets_train: ['LLVIP_t_train', ]
+    rgb_datasets_test: ['LLVIP_rgb_test', ]
+    t_datasets_test: ['LLVIP_t_test', ]
+  TRANSFORMS:
+    img_size: (1024, 1280)
+    img_resize_sizes:
+      - [1024, 1280]
+    RANDAUGMENT:
+      flag: True
+      aug_space: 'color'
+      num: 2
+      level: 10
+      random: True
+
+EXPERIMENT:
+  pretrain_model_path: '/data/wangsong/pretrain_models/r50_deformable_detr_plus_iterative_bbox_refinement-checkpoint.pth'

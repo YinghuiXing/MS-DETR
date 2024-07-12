@@ -1,0 +1,26 @@
+# 10183
+# nohup python -m torch.distributed.launch --nproc_per_node=4 --master_port 49104  fusion_main.py --exp_config exp_config/LLVIP/exp_1.yaml --output_dir /home/Newdisk/zhangshizhou/results/LLVIP/exp1 --action train > ../DAB-DETR-nohup/ms-detr/LLVIP_1_nohup &
+# python fusion_main.py --output_dir /home/Newdisk/zhangshizhou/results/LLVIP/exp1 --action test --resume /home/Newdisk/zhangshizhou/results/LLVIP/exp1/checkpoint.pth --exp_config exp_config/LLVIP/exp_1.yaml --visible_devices 2
+
+MODEL:
+  MS_DETR:
+    rgb_branch: True
+    t_branch: True
+  LOSS:
+    instance_reweight: True
+
+TEST:
+  metric: 'ap'
+
+DATASET:
+  format: 'voc'
+  KAIST:
+    root_dir: '/home/Newdisk/zhangshizhou/datasets/LLVIP'
+    rgb_datasets_train: ['LLVIP_rgb_train', ]
+    t_datasets_train: ['LLVIP_t_train', ]
+    rgb_datasets_test: [ 'LLVIP_rgb_test', ]
+    t_datasets_test: [ 'LLVIP_t_test', ]
+  TRANSFORMS:
+    img_size: (1024, 1280)
+EXPERIMENT:
+  pretrain_model_path: ''

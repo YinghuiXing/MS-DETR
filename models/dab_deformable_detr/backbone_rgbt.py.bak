@@ -1,0 +1,642 @@
+import torch
+import torch.nn.functional as F
+import torchvision
+import numpy as np
+import os
+from torch import nn
+from torchvision.models._utils import IntermediateLayerGetter
+from typing import Dict, List
+
+from util.misc import NestedTensor, is_main_process
+
+from .position_encoding import build_position_encoding
+from .common_modules import FrozenBatchNorm2d
+from .illumination_net import IlluminationNet
+from .resnet_bit import KNOWN_MODELS
+from .vgg import VGGBase
+
+from collections import OrderedDict
+
+
+class FusionVGGBase(nn.Module):
+    """
+    Fusion VGG base convolutions to produce lower-level fusion feature maps.
+    """
+
+    def __init__(self, log=False):
+        self.log = log
+        super(FusionVGGBase, self).__init__()
+
+        #################################### RGB ####################################
+
+        # Standard convolutional layers in VGG16
+        self.conv1_1_vis = nn.Conv2d(3, 64, kernel_size=3, padding=1, bias=True)
+        self.conv1_1_bn_vis = nn.BatchNorm2d(64, affine=True)
+        self.conv1_2_vis = nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=True)
+        self.conv1_2_bn_vis = nn.BatchNorm2d(64, affine=True)
+        self.pool1_vis = nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)
+
+        self.conv2_1_vis = nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=True)
+        self.conv2_1_bn_vis = nn.BatchNorm2d(128, affine=True)
+        self.conv2_2_vis = nn.Conv2d(128, 128, kernel_size=3, padding=1, bias=True)
+        self.conv2_2_bn_vis = nn.BatchNorm2d(128, affine=True)
+        self.pool2_vis = nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)
+
+        self.conv3_1_vis = nn.Conv2d(128, 256, kernel_size=3, padding=1, bias=True)
+        self.conv3_1_bn_vis = nn.BatchNorm2d(256, affine=True)
+        self.conv3_2_vis = nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=True)
+        self.conv3_2_bn_vis = nn.BatchNorm2d(256, affine=True)
+        self.conv3_3_vis = nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=True)
+        self.conv3_3_bn_vis = nn.BatchNorm2d(256, affine=True)
+        self.pool3_vis = nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)
+
+        self.conv4_1_vis = nn.Conv2d(256, 512, kernel_size=3, padding=1, bias=True)
+        self.conv4_1_bn_vis = nn.BatchNorm2d(512, affine=True)
+        self.conv4_2_vis = nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=True)
+        self.conv4_2_bn_vis = nn.BatchNorm2d(512, affine=True)
+        self.conv4_3_vis = nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=True)
+        self.conv4_3_bn_vis = nn.BatchNorm2d(512, affine=True)
+
+        #############################################################################
+
+        #################################### Thermal ####################################
+
+        # Standard convolutional layers in VGG16
+        self.conv1_1_lwir = nn.Conv2d(3, 64, kernel_size=3, padding=1, bias=True)
+        self.conv1_1_bn_lwir = nn.BatchNorm2d(64, affine=True)
+        self.conv1_2_lwir = nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=True)
+        self.conv1_2_bn_lwir = nn.BatchNorm2d(64, affine=True)
+
+        self.pool1_lwir = nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)
+
+        self.conv2_1_lwir = nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=True)
+        self.conv2_1_bn_lwir = nn.BatchNorm2d(128, affine=True)
+        self.conv2_2_lwir = nn.Conv2d(128, 128, kernel_size=3, padding=1, bias=True)
+        self.conv2_2_bn_lwir = nn.BatchNorm2d(128, affine=True)
+
+        self.pool2_lwir = nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)
+
+        self.conv3_1_lwir = nn.Conv2d(128, 256, kernel_size=3, padding=1, bias=True)
+        self.conv3_1_bn_lwir = nn.BatchNorm2d(256, affine=True)
+        self.conv3_2_lwir = nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=True)
+        self.conv3_2_bn_lwir = nn.BatchNorm2d(256, affine=True)
+        self.conv3_3_lwir = nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=True)
+        self.conv3_3_bn_lwir = nn.BatchNorm2d(256, affine=True)
+        self.pool3_lwir = nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)
+
+        self.conv4_1_lwir = nn.Conv2d(256, 512, kernel_size=3, padding=1, bias=True)
+        self.conv4_1_bn_lwir = nn.BatchNorm2d(512, affine=True)
+        self.conv4_2_lwir = nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=True)
+        self.conv4_2_bn_lwir = nn.BatchNorm2d(512, affine=True)
+        self.conv4_3_lwir = nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=True)
+        self.conv4_3_bn_lwir = nn.BatchNorm2d(512, affine=True)
+
+        #############################################################################
+
+        self.pool4 = nn.MaxPool2d(kernel_size=3, padding=1, stride=1, ceil_mode=True)
+
+        self.conv5_1 = nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=True)
+        self.conv5_1_bn = nn.BatchNorm2d(512, affine=True)
+        self.conv5_2 = nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=True)
+        self.conv5_2_bn = nn.BatchNorm2d(512, affine=True)
+        self.conv5_3 = nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=True)
+        self.conv5_3_bn = nn.BatchNorm2d(512, affine=True)
+        self.pool5 = nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)
+
+        # Replacements for FC6 and FC7 in VGG16
+        self.conv6_1 = nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=True)  # atrous convolution
+        self.conv6_1_bn = nn.BatchNorm2d(512, affine=True)
+        self.conv6_2 = nn.Conv2d(512, 512, kernel_size=1)
+
+        self.conv7_1 = nn.Conv2d(512, 256, kernel_size=1, stride=2)
+        self.conv7_2 = nn.Conv2d(256, 512, kernel_size=3, padding=1, bias=True)
+        self.conv7_2_bn = nn.BatchNorm2d(512, affine=True)
+
+        self.conv8_1 = nn.Conv2d(512, 256, kernel_size=1, stride=2)
+        nn.init.xavier_uniform_(self.conv8_1.weight)
+        nn.init.constant_(self.conv8_1.bias, 0.)
+        self.conv8_2 = nn.Conv2d(256, 512, kernel_size=3, padding=1, bias=True)  # stride = 1, by default
+        nn.init.xavier_uniform_(self.conv8_2.weight)
+        nn.init.constant_(self.conv8_2.bias, 0.)
+
+        self.conv9_1 = nn.Conv2d(512, 256, kernel_size=1)
+        nn.init.xavier_uniform_(self.conv9_1.weight)
+        nn.init.constant_(self.conv9_1.bias, 0.)
+        self.conv9_2 = nn.Conv2d(256, 512, kernel_size=3, padding=1, bias=True)
+        nn.init.xavier_uniform_(self.conv9_2.weight)
+        nn.init.constant_(self.conv9_2.bias, 0.)
+
+        self.conv10_1 = nn.Conv2d(512, 256, kernel_size=1)
+        nn.init.xavier_uniform_(self.conv10_1.weight)
+        nn.init.constant_(self.conv10_1.bias, 0.)
+        self.conv10_2 = nn.Conv2d(256, 512, kernel_size=3, padding=1, bias=True)
+        nn.init.xavier_uniform_(self.conv10_2.weight)
+        nn.init.constant_(self.conv10_2.bias, 0.)
+
+        self.feat_1 = nn.Conv2d(1024, 512, kernel_size=3, stride=1, padding=1, bias=False)
+        self.feat_1_bn = nn.BatchNorm2d(512, momentum=0.01)
+        self.feat_2 = nn.Conv2d(1024, 512, kernel_size=3, stride=1, padding=1, bias=False)
+        self.feat_2_bn = nn.BatchNorm2d(512, momentum=0.01)
+        self.feat_3 = nn.Conv2d(1024, 512, kernel_size=3, stride=1, padding=1, bias=False)
+        self.feat_3_bn = nn.BatchNorm2d(512, momentum=0.01)
+        self.feat_4 = nn.Conv2d(1024, 512, kernel_size=3, stride=1, padding=1, bias=False)
+        self.feat_4_bn = nn.BatchNorm2d(512, momentum=0.01)
+        self.feat_5 = nn.Conv2d(1024, 512, kernel_size=3, stride=1, padding=1, bias=False)
+        self.feat_5_bn = nn.BatchNorm2d(512, momentum=0.01)
+        self.feat_6 = nn.Conv2d(1024, 512, kernel_size=3, stride=1, padding=1, bias=False)
+        self.feat_6_bn = nn.BatchNorm2d(512, momentum=0.01)
+
+        # Rescale factor is initially set at 20, but is learned for each channel during back-prop
+        self.rescale_factors = nn.Parameter(torch.FloatTensor(1, 512, 1, 1))  # there are 512 channels in conv4_3_feats
+        nn.init.constant_(self.rescale_factors, 20)
+
+        # Load pretrained layers
+        self.load_pretrained_layers()
+
+    def forward(self, image_vis, image_lwir):
+        """
+        Forward propagation.
+
+        :param image: images, a tensor of dimensions (N, 3, 300, 300)
+        :return: lower-level feature maps conv4_3 and conv7
+        """
+
+        ############################ RGB #####################################
+
+        out_vis = F.relu(self.conv1_1_bn_vis(self.conv1_1_vis(image_vis)))
+        out_vis = F.relu(self.conv1_2_bn_vis(self.conv1_2_vis(out_vis)))
+        out_vis = self.pool1_vis(out_vis)
+
+        out_vis = F.relu(self.conv2_1_bn_vis(self.conv2_1_vis(out_vis)))
+        out_vis = F.relu(self.conv2_2_bn_vis(self.conv2_2_vis(out_vis)))
+        out_vis = self.pool2_vis(out_vis)
+
+        out_vis = F.relu(self.conv3_1_bn_vis(self.conv3_1_vis(out_vis)))
+        out_vis = F.relu(self.conv3_2_bn_vis(self.conv3_2_vis(out_vis)))
+        out_vis = F.relu(self.conv3_3_bn_vis(self.conv3_3_vis(out_vis)))
+        out_vis = self.pool3_vis(out_vis)
+
+        out_vis = F.relu(self.conv4_1_bn_vis(self.conv4_1_vis(out_vis)))
+        out_vis = F.relu(self.conv4_2_bn_vis(self.conv4_2_vis(out_vis)))
+        out_vis = F.relu(self.conv4_3_bn_vis(self.conv4_3_vis(out_vis)))
+        out_vis = self.pool4(out_vis)
+        ##########################################################################
+
+        ############################ Thermal #####################################
+
+        out_lwir = F.relu(self.conv1_1_bn_lwir(self.conv1_1_lwir(image_lwir)))
+        out_lwir = F.relu(self.conv1_2_bn_lwir(self.conv1_2_lwir(out_lwir)))
+        out_lwir = self.pool1_lwir(out_lwir)
+
+        out_lwir = F.relu(self.conv2_1_bn_lwir(self.conv2_1_lwir(out_lwir)))
+        out_lwir = F.relu(self.conv2_2_bn_lwir(self.conv2_2_lwir(out_lwir)))
+        out_lwir = self.pool2_lwir(out_lwir)
+
+        out_lwir = F.relu(self.conv3_1_bn_lwir(self.conv3_1_lwir(out_lwir)))
+        out_lwir = F.relu(self.conv3_2_bn_lwir(self.conv3_2_lwir(out_lwir)))
+        out_lwir = F.relu(self.conv3_3_bn_lwir(self.conv3_3_lwir(out_lwir)))
+        out_lwir = self.pool3_lwir(out_lwir)
+
+        out_lwir = F.relu(self.conv4_1_bn_lwir(self.conv4_1_lwir(out_lwir)))
+        out_lwir = F.relu(self.conv4_2_bn_lwir(self.conv4_2_lwir(out_lwir)))
+        out_lwir = F.relu(self.conv4_3_bn_lwir(self.conv4_3_lwir(out_lwir)))
+        out_lwir = self.pool4(out_lwir)
+
+        #########################################################################
+
+        conv4_3_feats = torch.cat([out_vis, out_lwir], dim=1)
+        conv4_3_feats = F.relu(self.feat_1_bn(self.feat_1(conv4_3_feats)))
+
+        #########################################################################
+
+        # Rescale conv4_3 after L2 norm
+        norm = conv4_3_feats.pow(2).sum(dim=1, keepdim=True).sqrt()
+        conv4_3_feats = conv4_3_feats / norm
+        conv4_3_feats = conv4_3_feats * self.rescale_factors
+
+        out_vis = F.relu(self.conv5_1_bn(self.conv5_1(out_vis)))
+        out_vis = F.relu(self.conv5_2_bn(self.conv5_2(out_vis)))
+        out_vis = F.relu(self.conv5_3_bn(self.conv5_3(out_vis)))
+        out_vis = self.pool5(out_vis)
+        out_lwir = F.relu(self.conv5_1_bn(self.conv5_1(out_lwir)))
+        out_lwir = F.relu(self.conv5_2_bn(self.conv5_2(out_lwir)))
+        out_lwir = F.relu(self.conv5_3_bn(self.conv5_3(out_lwir)))
+        out_lwir = self.pool5(out_lwir)
+
+        out_vis = F.relu(self.conv6_1_bn(self.conv6_1(out_vis)))
+        out_vis = F.relu(self.conv6_2(out_vis))
+        out_lwir = F.relu(self.conv6_1_bn(self.conv6_1(out_lwir)))
+        out_lwir = F.relu(self.conv6_2(out_lwir))
+
+        #########################################################################
+
+        conv6_feats = torch.cat([out_vis, out_lwir], dim=1)
+        conv6_feats = F.relu(self.feat_2_bn(self.feat_2(conv6_feats)))
+
+        #########################################################################
+
+        out_vis = F.relu(self.conv7_1(out_vis))
+        out_vis = F.relu(self.conv7_2_bn(self.conv7_2(out_vis)))
+        out_lwir = F.relu(self.conv7_1(out_lwir))
+        out_lwir = F.relu(self.conv7_2_bn(self.conv7_2(out_lwir)))
+
+        #########################################################################
+
+        conv7_feats = torch.cat([out_vis, out_lwir], dim=1)
+        conv7_feats = F.relu(self.feat_3_bn(self.feat_3(conv7_feats)))
+
+        #########################################################################
+
+        out_vis = F.relu(self.conv8_1(out_vis))
+        out_vis = F.relu(self.conv8_2(out_vis))
+        out_lwir = F.relu(self.conv8_1(out_lwir))
+        out_lwir = F.relu(self.conv8_2(out_lwir))
+
+        #########################################################################
+
+        conv8_feats = torch.cat([out_vis, out_lwir], dim=1)
+        conv8_feats = F.relu(self.feat_4_bn(self.feat_4(conv8_feats)))
+
+        #########################################################################
+
+        out_vis = F.relu(self.conv9_1(out_vis))
+        out_vis = F.relu(self.conv9_2(out_vis))
+        out_lwir = F.relu(self.conv9_1(out_lwir))
+        out_lwir = F.relu(self.conv9_2(out_lwir))
+
+        #########################################################################
+
+        conv9_feats = torch.cat([out_vis, out_lwir], dim=1)
+        conv9_feats = F.relu(self.feat_5_bn(self.feat_5(conv9_feats)))
+
+        #########################################################################
+
+        out_vis = F.relu(self.conv10_1(out_vis))
+        out_vis = F.relu(self.conv10_2(out_vis))
+        out_lwir = F.relu(self.conv10_1(out_lwir))
+        out_lwir = F.relu(self.conv10_2(out_lwir))
+
+        #########################################################################
+
+        conv10_feats = torch.cat([out_vis, out_lwir], dim=1)
+        conv10_feats = F.relu(self.feat_6_bn(self.feat_6(conv10_feats)))
+
+        #########################################################################
+
+        if self.log:
+            print('After conv4_3, RGB feature shape:', out_vis.shape)
+            print('After conv4_3, Thermal feature shape:', out_lwir.shape)
+            print('conv4_3 feature shape:', conv4_3_feats.shape)
+            print('conv6 feature shape:', conv6_feats.shape)
+            print('conv7 feature shape:', conv7_feats.shape)
+            print('conv8 feature shape:', conv8_feats.shape)
+            print('conv9 feature shape:', conv9_feats.shape)
+            print('conv10 feature shape:', conv10_feats.shape)
+
+        # Lower-level feature maps
+        result = dict()
+        result['conv4_3'] = conv4_3_feats
+        result['conv6'] = conv6_feats
+        result['conv7'] = conv7_feats
+        result['conv8'] = conv8_feats
+        result['conv9'] = conv9_feats
+        result['conv10'] = conv10_feats
+
+        return result
+
+    def load_pretrained_layers(self):
+        """
+        As in the paper, we use a VGG-16 pretrained on the ImageNet task as the base network.
+        There's one available in PyTorch, see https://pytorch.org/docs/stable/torchvision/models.html#torchvision.models.vgg16
+        We copy these parameters into our network. It's straightforward for conv1 to conv5.
+        However, the original VGG-16 does not contain the conv6 and con7 layers.
+        Therefore, we convert fc6 and fc7 into convolutional layers, and subsample by decimation. See 'decimate' in utils.py.
+        """
+
+        # Current state of base
+        state_dict = self.state_dict()
+        param_names = list(state_dict.keys())
+
+        # Pretrained VGG base
+        pretrained_state_dict = torchvision.models.vgg16_bn(pretrained=True).state_dict()
+        pretrained_param_names = list(pretrained_state_dict.keys())
+
+        # Transfer conv. parameters from pretrained model to current model
+        for i, param in enumerate(param_names[1:71]):
+            state_dict[param] = pretrained_state_dict[pretrained_param_names[i]]
+
+        for i, param in enumerate(param_names[71:141]):
+            state_dict[param] = pretrained_state_dict[pretrained_param_names[i]]
+            # if param == 'conv1_1_lwir.weight':
+            #     state_dict[param] = pretrained_state_dict[pretrained_param_names[i]][:, 0:1, :, :]
+            # else:
+            #     state_dict[param] = pretrained_state_dict[pretrained_param_names[i]]
+
+        for i, param in enumerate(param_names[141:162]):
+            state_dict[param] = pretrained_state_dict[pretrained_param_names[i + 70]]
+
+        self.load_state_dict(state_dict)
+
+        print("\nLoaded base model.\n")
+
+
+class FusionResnetBase(nn.Module):
+    def __init__(self, backbone_rgb_name, backbone_t_name):
+        super(FusionResnetBase, self).__init__()
+        norm_layer = FrozenBatchNorm2d
+        backbone_rgb = getattr(torchvision.models, backbone_rgb_name)(replace_stride_with_dilation=[False, False, False], pretrained=is_main_process(), norm_layer=norm_layer)
+        backbone_t = getattr(torchvision.models, backbone_t_name)(replace_stride_with_dilation=[False, False, False], pretrained=is_main_process(), norm_layer=norm_layer)
+        return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
+        # num_channels_rgb = [512, 1024, 2048]
+        # num_channels_t = [128, 256, 512]
+        self.body_rgb = IntermediateLayerGetter(backbone_rgb, return_layers=return_layers)
+        self.body_t = IntermediateLayerGetter(backbone_t, return_layers)
+
+        self.feat_1 = nn.Conv2d(640, 640, kernel_size=3, stride=1, padding=1, bias=False)
+        self.feat_1_bn = nn.BatchNorm2d(640, momentum=0.01)
+
+        self.feat_2 = nn.Conv2d(1280, 1280, kernel_size=3, stride=1, padding=1, bias=False)
+        self.feat_2_bn = nn.BatchNorm2d(1280, momentum=0.01)
+
+        self.feat_3 = nn.Conv2d(2560, 2560, kernel_size=3, stride=1, padding=1, bias=False)
+        self.feat_3_bn = nn.BatchNorm2d(2560, momentum=0.01)
+
+    def forward(self, image_vis, image_lwir):
+        xs_rgb = self.body_rgb(image_vis)
+        xs_t = self.body_t(image_lwir)
+
+        layer2_feats = torch.cat([xs_rgb['0'], xs_t['0']], dim=1)
+        layer2_feats = F.relu(self.feat_1_bn(self.feat_1(layer2_feats)))
+
+        layer3_feats = torch.cat([xs_rgb['1'], xs_t['1']], dim=1)
+        layer3_feats = F.relu(self.feat_2_bn(self.feat_2(layer3_feats)))
+
+        layer4_feats = torch.cat([xs_rgb['2'], xs_t['2']], dim=1)
+        layer4_feats = F.relu(self.feat_3_bn(self.feat_3(layer4_feats)))
+
+        result = dict()
+        result['layer2'] = layer2_feats
+        result['layer3'] = layer3_feats
+        result['layer4'] = layer4_feats
+
+        return result
+
+
+class LayerGetter(nn.Module):
+    def __init__(self, model: nn.Module, return_layers: Dict[str, str]) -> None:
+        super(LayerGetter, self).__init__()
+        self.model = model
+        self.return_layers = return_layers
+
+    def forward(self, x_rgb, x_t):
+        out = OrderedDict()
+        result = self.model(x_rgb, x_t)
+        for name, value in result.items():
+            if name in self.return_layers:
+                out_name = self.return_layers[name]
+                out[out_name] = value
+        return out
+
+
+class RGBTBackboneBase(nn.Module):
+    def _init_single_modality(self, backbone, train_backbone, return_interm_layers, backbone_name):
+        if 'BiT' in backbone_name:
+            for name, parameter in backbone.named_parameters():
+                if not train_backbone or 'block2' not in name and 'block3' not in name and 'block4' not in name:
+                    parameter.requires_grad_(False)
+
+            if return_interm_layers:
+                strides = [8, 16, 32]
+                return_layers = {"block2": "0", "block3": "1", "block4": "2"}
+                num_channels = [512, 1024, 2048]
+            else:
+                strides = [32]
+                return_layers = {'block4': "0"}
+                num_channels = [2048]
+        elif 'vgg16' in backbone_name:
+            return_layers = None
+            strides = [8, 16, 32]
+            num_channels = [512, 512, 512]
+        elif 'vgg_fusion' in backbone_name:
+            return_layers = {"conv4_3": "0", "conv6": "1", "conv7": "2", "conv10": "3"}
+            strides = [8, 16, 32, 64]
+            num_channels = [512, 512, 512, 512]
+        elif 'resnet_fusion' in backbone_name:
+            return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
+            strides = [8, 16, 32]
+            num_channels = [640, 1280, 2560]
+        else:
+            for name, parameter in backbone.named_parameters():
+                if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
+                    parameter.requires_grad_(False)
+
+            if return_interm_layers:
+                return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
+                strides = [8, 16, 32]
+                if backbone_name in ('resnet18', 'resnet34'):
+                    num_channels = [128, 256, 512]
+                else:
+                    num_channels = [512, 1024, 2048]
+            else:
+                return_layers = {'layer4': "0"}
+                strides = [32]
+                if backbone_name in ('resnet18', 'resnet34'):
+                    num_channels = [512]
+                else:
+                    num_channels = [2048]
+        return return_layers, strides, num_channels
+
+    def __init__(self, backbone_rgb: nn.Module, backbone_t: nn.Module, train_backbone: bool, return_interm_layers: bool, backbone_name_rgb: str, backbone_name_t: str, fusion_backbone: nn.Module):
+        super().__init__()
+
+        self.body_fusion = None
+        self.body_rgb = None
+        self.body_t = None
+
+        self.num_channels_fusion = None
+        self.num_channels_rgb = None
+        self.num_channels_t = None
+
+        if fusion_backbone is not None:
+            assert backbone_rgb is None
+            assert backbone_t is None
+            assert backbone_name_rgb == backbone_name_t
+            return_layers_fusion, strides_fusion, self.num_channels_fusion = self._init_single_modality(fusion_backbone,
+                                                                                                train_backbone,
+                                                                                                return_interm_layers,
+                                                                                                backbone_name_rgb)
+            self.strides = strides_fusion
+            self.body_fusion = LayerGetter(fusion_backbone, return_layers_fusion)
+        else:
+            return_layers_rgb, strides_rgb, self.num_channels_rgb = self._init_single_modality(backbone_rgb,
+                                                                                                train_backbone,
+                                                                                                return_interm_layers,
+                                                                                                backbone_name_rgb)
+            return_layers_t, strides_t, self.num_channels_t = self._init_single_modality(backbone_t,
+                                                                                          train_backbone,
+                                                                                          return_interm_layers,
+                                                                                          backbone_name_t)
+            assert strides_rgb == strides_t
+            self.strides = strides_rgb
+
+            self.body_rgb = IntermediateLayerGetter(backbone_rgb, return_layers=return_layers_rgb) if 'vgg16' not in backbone_name_rgb else backbone_rgb
+            self.body_t = IntermediateLayerGetter(backbone_t, return_layers=return_layers_t) if 'vgg16' not in backbone_name_t else backbone_t
+
+    def forward(self, tensor_list_rgb: NestedTensor, tensor_list_t: NestedTensor):
+        out_rgb: Dict[str, NestedTensor] = {}
+        out_t: Dict[str, NestedTensor] = {}
+        out_fusion: Dict[str, NestedTensor] = {}
+
+        if self.body_fusion is None:
+            xs_rgb = self.body_rgb(tensor_list_rgb.tensors)
+            xs_t = self.body_t(tensor_list_t.tensors)
+
+            for name, x in xs_rgb.items():
+                m = tensor_list_rgb.mask
+                assert m is not None
+                mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+                out_rgb[name] = NestedTensor(x, mask)
+
+            for name, x in xs_t.items():
+                m = tensor_list_t.mask
+                assert m is not None
+                mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+                out_t[name] = NestedTensor(x, mask)
+        else:
+            xs_fusion = self.body_fusion(tensor_list_rgb.tensors, tensor_list_t.tensors)
+
+            for name, x in xs_fusion.items():
+                m_rgb = tensor_list_rgb.mask
+                m_t = tensor_list_t.mask
+
+                assert m_rgb is not None
+                assert m_t is not None
+                assert m_rgb.equal(m_t)
+
+                mask = F.interpolate(m_rgb[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+                out_fusion[name] = NestedTensor(x, mask)
+
+        return out_rgb, out_t, out_fusion
+
+
+class RGBTBackbone(RGBTBackboneBase):
+    """ResNet backbone with frozen BatchNorm."""
+
+    def _init_backbone(self, name, dilation, backbone_pretrain_path):
+        if 'BiT' in name:
+            backbone = KNOWN_MODELS[name](head_size=0)
+            if is_main_process():
+                backbone.load_from(np.load(f"{backbone_pretrain_path}"))
+        elif 'Clip' in name:
+            rn50_path = os.path.expanduser("~/.cache/clip/RN50.pt")
+            with open(rn50_path, 'rb') as opened_file:
+                backbone = torch.jit.load(opened_file, map_location='cpu').visual.to(torch.float32)
+        elif 'vgg16' in name:
+            backbone = VGGBase(is_main_process())
+        elif 'vgg_fusion' in name:
+            backbone = FusionVGGBase()
+        elif 'resnet_fusion' in name:
+            backbone = FusionResnetBase('resnet50', 'resnet18')
+        else:
+            norm_layer = FrozenBatchNorm2d
+            backbone = getattr(torchvision.models, name)(replace_stride_with_dilation=[False, False, dilation], pretrained=is_main_process(), norm_layer=norm_layer)
+
+        return backbone
+
+    def __init__(self, name_rgb: str,
+                 name_t: str,
+                 train_backbone: bool,
+                 return_interm_layers: bool,
+                 dilation: bool,
+                 backbone_pretrain_path_rgb: str,
+                 backbone_pretrain_path_t: str,
+                 semantic_share: bool):
+        self.backbone_fusion = False
+        # 骨干网络进行融合
+        if name_rgb == name_t and 'fusion' in name_rgb:
+            self.backbone_fusion = True
+            fusion_backbone = self._init_backbone(name_rgb, dilation, backbone_pretrain_path_rgb)
+        # 骨干网络不进行融合
+        else:
+            backbone_rgb = self._init_backbone(name_rgb, dilation, backbone_pretrain_path_rgb)
+            backbone_t = self._init_backbone(name_t, dilation, backbone_pretrain_path_t)
+
+        if semantic_share:
+            pass
+
+        # assert name not in ('resnet18', 'resnet34'), "number of channels are hard coded"
+
+        if self.backbone_fusion:
+            super().__init__(None, None, train_backbone, return_interm_layers, name_rgb, name_t, fusion_backbone)
+        else:
+            super().__init__(backbone_rgb, backbone_t, train_backbone, return_interm_layers, name_rgb, name_t, None)
+
+        if dilation:
+            self.strides[-1] = self.strides[-1] // 2
+
+
+class RGBTJoiner(nn.Sequential):
+    def __init__(self, backbone, position_embedding, illumination_net):
+        if illumination_net is not None:
+            super().__init__(backbone, position_embedding, illumination_net)
+            self.illumination = True
+        else:
+            super().__init__(backbone, position_embedding)
+            self.illumination = False
+
+        self.strides = backbone.strides
+        self.num_channels_rgb = backbone.num_channels_rgb
+        self.num_channels_t = backbone.num_channels_t
+        self.num_channels_fusion = backbone.num_channels_fusion
+
+    def forward(self, tensor_list_rgb: NestedTensor, tensor_list_t: NestedTensor):
+        out_rgb: List[NestedTensor] = []
+        out_t: List[NestedTensor] = []
+        out_fusion: List[NestedTensor] = []
+
+        pos_rgb = []
+        pos_t = []
+        pos_fusion = []
+
+        # Firstly, extract multimodal feature maps
+        xs_rgb, xs_t, xs_fusion = self[0](tensor_list_rgb, tensor_list_t)
+
+        if len(xs_fusion):
+            for name, x in sorted(xs_fusion.items()):
+                out_fusion.append(x)
+        else:
+            for name, x in sorted(xs_rgb.items()):
+                out_rgb.append(x)
+
+            for name, x in sorted(xs_t.items()):
+                out_t.append(x)
+
+        # Secondly, generate position encodings
+        if len(out_fusion):
+            for x in out_fusion:
+                pos_fusion.append(self[1](x).to(x.tensors.dtype))
+        else:
+            for x in out_rgb:
+                pos_rgb.append(self[1](x).to(x.tensors.dtype))
+
+            for x in out_t:
+                pos_t.append(self[1](x).to(x.tensors.dtype))
+
+        # Finally, predict illumination coefficients according to rgb images
+        if self.illumination:
+            illu_dict = self[2](tensor_list_rgb)
+            return out_rgb, out_t, pos_rgb, pos_t, illu_dict, out_fusion, pos_fusion
+        else:
+            return out_rgb, out_t, pos_rgb, pos_t, None, out_fusion, pos_fusion
+
+
+def build_rgbt_backbone(args):
+    position_embedding = build_position_encoding(args)
+    illu_net = None
+    if args.illumination:
+        illu_net = IlluminationNet(args.illumination_two_weight)
+    train_backbone = args.lr_backbone > 0
+    return_interm_layers = args.masks or (args.num_feature_levels > 1)
+    backbone = RGBTBackbone(args.backbone_rgb, args.backbone_t, train_backbone, return_interm_layers, args.dilation, args.backbone_pretrain_path_rgb, args.backbone_pretrain_path_t, args.backbone_semantic_share)
+    model = RGBTJoiner(backbone, position_embedding, illu_net)
+    return model
