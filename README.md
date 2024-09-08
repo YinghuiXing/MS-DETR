@@ -70,10 +70,14 @@ $ python evaluation_script.py \
 
 If you find this code helpful, please kindly cite:
 ```bib
-@article{xing2023multispectral,
-  title={Multispectral Pedestrian Detection via Reference Box Constrained Cross Attention and Modality Balanced Optimization},
-  author={Xing, Yinghui and Wang, Song and Liang, Guoqiang and Li, Qingyi and Zhang, Xiuwei and Zhang, Shizhou and Zhang, Yanning},
-  journal={arXiv preprint arXiv:2302.00290},
-  year={2023}
-}
+@ARTICLE{10669167,
+  author={Xing, Yinghui and Yang, Shuo and Wang, Song and Zhang, Shizhou and Liang, Guoqiang and Zhang, Xiuwei and Zhang, Yanning},
+  journal={IEEE Transactions on Intelligent Transportation Systems}, 
+  title={MS-DETR: Multispectral Pedestrian Detection Transformer With Loosely Coupled Fusion and Modality-Balanced Optimization}, 
+  year={2024},
+  volume={},
+  number={},
+  pages={1-15},
+  keywords={Multispectral pedestrian detection;end-to-end detector;loosely coupled fusion;modality-balanced optimization},
+  doi={10.1109/TITS.2024.3450584}}
 ```
